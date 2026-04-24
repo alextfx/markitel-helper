@@ -84,10 +84,3 @@ pub async fn exchange_and_persist(app: &AppHandle, code: &str) -> Result<PairedE
     Ok(event)
 }
 
-// ── Tauri 2.x deep-link extension trait plumbing ──────────────────────
-//
-// In Tauri 2.x, the deep-link plugin installs itself onto AppHandle via
-// a trait extension — `use tauri_plugin_deep_link::DeepLinkExt;`. That
-// trait is NOT imported by default, so we re-export it here for
-// convenience + to centralize the version dependency.
-pub use tauri_plugin_deep_link::DeepLinkExt;

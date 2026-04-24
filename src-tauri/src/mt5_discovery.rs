@@ -162,7 +162,7 @@ pub fn is_mt5_running() -> bool {
         sys.refresh_processes();
         let names = ["terminal64.exe", "terminal.exe", "MetaTrader 5", "metatrader"];
         for (_pid, proc_) in sys.processes() {
-            let n = proc_.name().to_string_lossy().to_lowercase();
+            let n = proc_.name().to_lowercase();
             if names.iter().any(|needle| n.contains(&needle.to_lowercase())) {
                 return true;
             }

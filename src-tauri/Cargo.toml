@@ -16,7 +16,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # Tauri core + stable plugins. Pin minor versions — 2.x has had breaking
 # API changes between minors a few times since release. Bump deliberately.
-tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-http = { version = "2", features = ["rustls-tls"] }
 tauri-plugin-deep-link = "2"
@@ -40,6 +40,9 @@ keyring = "3"
 # File system helpers + path manipulation
 walkdir = "2"
 dirs = "5"
+
+# URL parsing — used by pairing::parse_code for markitel://pair?code=XXXXXX.
+url = "2"
 
 # Logging
 log = "0.4"

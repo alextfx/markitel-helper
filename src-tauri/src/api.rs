@@ -153,7 +153,9 @@ pub async fn fetch_ea_source(cached_version: Option<&str>) -> Result<Option<EaSo
 
 // ── /helper-version ───────────────────────────────────────────────────
 
-#[derive(Deserialize, Clone)]
+// `Serialize` is required because this struct is returned by a
+// `#[tauri::command]` and therefore crosses the Rust→JS IPC boundary.
+#[derive(Serialize, Deserialize, Clone)]
 pub struct HelperVersionInfo {
     pub latest: String,
     #[serde(rename = "minSupported")]
@@ -164,7 +166,7 @@ pub struct HelperVersionInfo {
     pub release_notes: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct DownloadUrls {
     pub mac: Option<String>,
     pub windows: Option<String>,
