@@ -30,8 +30,11 @@ pub struct PairedEvent {
     pub broker_name: String,
 }
 
-/// Entry point for the Tauri deep-link plugin. Runs async on the tokio
-/// runtime the plugin exposes.
+/// Entry point for the Tauri deep-link plugin. The plugin fires its
+/// callback on the main thread — NOT inside a Tokio runtime — so we
+/// must use `tauri::async_runtime::spawn` (which knows how to attach
+/// to Tauri's own runtime) rather than raw `tokio::spawn` (which
+/// would panic with "no reactor running").
 pub fn handle_deep_link(app: &AppHandle, url: url::Url) {
     let code = match parse_code(&url) {
         Some(c) => c,
@@ -41,7 +44,7 @@ pub fn handle_deep_link(app: &AppHandle, url: url::Url) {
         }
     };
     let app = app.clone();
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         if let Err(e) = exchange_and_persist(&app, &code).await {
             log::error!("pair exchange failed: {e}");
             telemetry::fire("error", Some(&code), Some(&e), None);

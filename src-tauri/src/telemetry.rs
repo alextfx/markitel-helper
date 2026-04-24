@@ -30,7 +30,10 @@ pub fn fire(phase: &str, pairing_code: Option<&str>, error: Option<&str>, metada
     let error = error.map(String::from);
     let metadata = metadata;
 
-    tokio::spawn(async move {
+    // Use Tauri's async runtime (not raw `tokio::spawn`) — `fire` gets
+    // called from any context including the deep-link callback, which
+    // isn't inside a Tokio runtime and would otherwise panic.
+    tauri::async_runtime::spawn(async move {
         let event = TelemetryEvent {
             phase: &phase,
             platform: std::env::consts::OS,
