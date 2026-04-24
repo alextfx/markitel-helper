@@ -1,6 +1,6 @@
 [package]
 name = "markitel-helper"
-version = "0.0.2"
+version = "0.0.3"
 description = "Markitel MT5 Bridge Helper"
 authors = ["Markitel"]
 edition = "2021"
