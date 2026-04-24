@@ -1,0 +1,58 @@
+[package]
+name = "markitel-helper"
+version = "0.0.1"
+description = "Markitel MT5 Bridge Helper"
+authors = ["Markitel"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "markitel_helper_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri core + stable plugins. Pin minor versions — 2.x has had breaking
+# API changes between minors a few times since release. Bump deliberately.
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-shell = "2"
+tauri-plugin-http = { version = "2", features = ["rustls-tls"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime (Tauri 2 uses tokio under the hood)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
+
+# HTTP client for backend calls — `reqwest` so we're not tied to the tauri
+# HTTP plugin's specific surface area.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# OS keychain / credential store.
+keyring = "3"
+
+# File system helpers + path manipulation
+walkdir = "2"
+dirs = "5"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Windows-specific: detect running MT5 process. On non-Windows this is gated.
+[target.'cfg(windows)'.dependencies]
+sysinfo = "0.30"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sysinfo = "0.30"
+
+[features]
+# Tauri required features
+custom-protocol = ["tauri/custom-protocol"]
+default = ["custom-protocol"]
