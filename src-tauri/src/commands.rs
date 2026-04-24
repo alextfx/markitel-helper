@@ -19,6 +19,11 @@ pub struct HelperStatus {
 pub async fn status() -> HelperStatus {
     let loaded = keychain::load().ok().flatten();
     let prefix = loaded.as_deref().map(|k| k.chars().take(11).collect::<String>());
+    log::info!(
+        "status(): paired={}, prefix={:?}",
+        loaded.is_some(),
+        prefix,
+    );
     HelperStatus {
         paired: loaded.is_some(),
         api_key_prefix: prefix,

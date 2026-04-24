@@ -74,6 +74,16 @@ pub async fn exchange_and_persist(app: &AppHandle, code: &str) -> Result<PairedE
     let resp = api::exchange_pairing_code(code).await?;
     keychain::save(&resp.api_key)?;
 
+    // Read-back sanity check. On macOS, ad-hoc-signed dev builds can
+    // accept SecItemAdd silently without persisting the entry (the
+    // access group is tied to a code-sign identity that varies per
+    // build). On properly signed production builds this is a no-op.
+    match keychain::load() {
+        Ok(Some(_)) => log::info!("keychain save+read-back OK"),
+        Ok(None) => log::warn!("keychain save reported OK but read-back returned None (ad-hoc-signed dev build?)"),
+        Err(e) => log::warn!("keychain read-back errored: {e}"),
+    }
+
     telemetry::fire("pair-exchanged", Some(code), None, None);
 
     let event = PairedEvent {
