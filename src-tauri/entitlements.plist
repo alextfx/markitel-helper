@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the hardened-runtime macOS build.
+
+  We intentionally do NOT enable the App Sandbox — the helper needs to
+  read/write user-owned MT5 data directories under
+  `~/Library/Application Support/**/MQL5/Experts/` that are outside
+  any sandbox container path. The hardened runtime (sans sandbox)
+  plus notarization satisfies Gatekeeper without boxing us in.
+
+  allow-jit + allow-unsigned-executable-memory are both required by
+  WebKit's JS engine (WebKit.framework embeds its JIT and reaches for
+  unsigned memory pages for bytecode). Omitting either crashes the
+  webview on first navigation inside a hardened-runtime build.
+
+  allow-dyld-environment-variables is required so Tauri's own runtime
+  can set DYLD_LIBRARY_PATH / DYLD_FRAMEWORK_PATH during startup — a
+  no-op on notarized production builds but load-bearing during local
+  development when running the unsigned debug binary.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <key>com.apple.security.network.client</key>
+  <true/>
+</dict>
+</plist>
