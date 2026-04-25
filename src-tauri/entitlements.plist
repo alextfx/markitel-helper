@@ -30,20 +30,23 @@
   <key>com.apple.security.network.client</key>
   <true/>
   <!--
-    Explicit keychain access group is required for the modern data-
-    protection keychain (which the `keyring` crate v3 uses on macOS) to
-    persist entries across app launches under a stable identity. Without
-    this declaration, the OS falls back to an implicit per-build access
-    group and the entry can vanish silently between launches even on
-    properly Developer-ID-signed builds — exactly the behaviour we hit
-    with the v0.0.5 helper. Hardcoded to the team prefix
-    (43A3ZC429K = Alexey Tatarnikov / Apple Developer Program) since
-    codesign + tauri-action don't expand $(TeamIdentifierPrefix) the way
-    Xcode does.
+    NOTE: We tried adding `keychain-access-groups` here in v0.0.6 to
+    pin the data-protection keychain group to a stable value across
+    builds. AMFI rejected the launch with -413 "No matching profile
+    found" because keychain-access-groups is a *restricted*
+    entitlement that requires an embedded provisioning profile —
+    something Developer ID (non-App-Store) distribution doesn't have.
+
+    For Developer ID apps, the implicit access group
+    (<TeamID>.<bundleid>) is granted automatically as long as the
+    app's signing identity stays stable. The keyring crate's modern
+    SecItem-based path uses this implicit group on macOS, and entries
+    persist correctly across launches of the same signed binary.
+
+    If we ever need an explicit group (e.g. for sharing keychain
+    items between sibling helper apps under the same team), we'd
+    need to enroll a Mac App Store / TestFlight distribution path
+    with proper provisioning profiles. Not worth it.
   -->
-  <key>keychain-access-groups</key>
-  <array>
-    <string>43A3ZC429K.com.markitel.helper</string>
-  </array>
 </dict>
 </plist>
