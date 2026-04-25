@@ -147,3 +147,55 @@ code {
   padding: 10px 12px;
   border-radius: 6px;
 }
+
+.spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid #2a2a30;
+  border-top-color: #2f6feb;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 8px 0;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+button.link {
+  background: transparent;
+  border: none;
+  color: #6f9aff;
+  padding: 4px 0;
+  text-align: left;
+  width: fit-content;
+  font-size: 12px;
+}
+
+button.link:hover {
+  background: transparent;
+  text-decoration: underline;
+}
+
+.install-details {
+  margin-top: 4px;
+}
+
+.install-details summary {
+  cursor: pointer;
+  color: #a0a0a0;
+  font-size: 12px;
+}
+
+ul.paths {
+  margin: 6px 0 4px 16px;
+  padding: 0;
+  font-size: 11px;
+}
+
+ul.paths code {
+  font-size: 11px;
+  word-break: break-all;
+}

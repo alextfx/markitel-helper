@@ -13,7 +13,7 @@
 //!   - fire `pair-exchanged` telemetry
 //!   - emit `helper://paired` to the frontend so it can advance the UI
 
-use crate::{api, keychain, telemetry};
+use crate::{api, commands, keychain, mt5_discovery, telemetry};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use url::Url;
@@ -68,6 +68,15 @@ fn parse_code(url: &Url) -> Option<String> {
 
 /// Callable from the UI (via the `pair_with_code` Tauri command) so users
 /// can paste the 6-char code manually if the OS refused the deep link.
+///
+/// Post-pair flow (as of v0.0.6): we DON'T just save the key and bail.
+/// We chain straight into `install_ea_inner` so the EA actually lands
+/// in MT5 without a second user click. The wizard markets this path
+/// as "auto-installs the EA"; this is what makes that promise true.
+///
+/// If MT5 is running we skip the install (it would need to clobber a
+/// loaded EA), emit a `helper://needs-mt5-closed` event, and let the
+/// UI prompt the user to close MT5 + click the manual Install button.
 pub async fn exchange_and_persist(app: &AppHandle, code: &str) -> Result<PairedEvent, String> {
     telemetry::fire("pair-started", Some(code), None, None);
 
@@ -77,10 +86,11 @@ pub async fn exchange_and_persist(app: &AppHandle, code: &str) -> Result<PairedE
     // Read-back sanity check. On macOS, ad-hoc-signed dev builds can
     // accept SecItemAdd silently without persisting the entry (the
     // access group is tied to a code-sign identity that varies per
-    // build). On properly signed production builds this is a no-op.
+    // build). On properly signed production builds the entitlements
+    // declare an explicit keychain-access-groups, which fixes this.
     match keychain::load() {
         Ok(Some(_)) => log::info!("keychain save+read-back OK"),
-        Ok(None) => log::warn!("keychain save reported OK but read-back returned None (ad-hoc-signed dev build?)"),
+        Ok(None) => log::warn!("keychain save reported OK but read-back returned None"),
         Err(e) => log::warn!("keychain read-back errored: {e}"),
     }
 
@@ -93,6 +103,37 @@ pub async fn exchange_and_persist(app: &AppHandle, code: &str) -> Result<PairedE
         broker_name: resp.connection.broker_name.clone(),
     };
     let _ = app.emit("helper://paired", event.clone());
+
+    // ── Auto-install on pair ────────────────────────────────────────
+    // The wizard tells the user this is "one click — auto-installs
+    // the EA". Make that true by chaining install right here. We
+    // separately emit `helper://needs-mt5-closed` if MT5 is running so
+    // the UI can show the actionable Close-MT5 hint instead of
+    // pretending nothing happened.
+    if mt5_discovery::is_mt5_running() {
+        log::info!("MT5 is running — deferring auto-install");
+        telemetry::fire("install-deferred-mt5-running", None, None, None);
+        let _ = app.emit("helper://needs-mt5-closed", ());
+        return Ok(event);
+    }
+
+    match commands::install_ea_inner(&resp.api_key).await {
+        Ok(install_result) => {
+            log::info!(
+                "auto-install completed: {} terminal(s) written",
+                install_result.written_to.len()
+            );
+            // Emit the install summary so the UI can show the result
+            // screen directly instead of an intermediate "click to
+            // install" gate.
+            let _ = app.emit("helper://paired-and-installed", install_result);
+        }
+        Err(e) => {
+            log::warn!("auto-install after pair failed: {e}");
+            telemetry::fire("install-error", None, Some(&e), None);
+            let _ = app.emit("helper://install-error", e);
+        }
+    }
 
     Ok(event)
 }

@@ -75,7 +75,9 @@ pub async fn launch_mt5() -> Result<(), String> {
     r
 }
 
-#[derive(Serialize)]
+// `Clone` is needed because we emit this struct as a Tauri event
+// payload, and `Emitter::emit` requires `S: Serialize + Clone`.
+#[derive(Serialize, Clone)]
 pub struct InstallEaResult {
     #[serde(rename = "writtenTo")]
     pub written_to: Vec<String>,
@@ -85,7 +87,7 @@ pub struct InstallEaResult {
     pub profile_results: Vec<ProfileSummary>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct WhitelistSummary {
     pub terminal: String,
     pub edited: bool,
@@ -94,28 +96,49 @@ pub struct WhitelistSummary {
     pub error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct ProfileSummary {
     pub terminal: String,
     pub outcome: profile_writer::ProfileWriteOutcome,
 }
 
-#[tauri::command]
-pub async fn install_ea() -> Result<InstallEaResult, String> {
-    if mt5_discovery::is_mt5_running() {
-        return Err("MT5 is currently running. Please close MT5 and try again.".to_string());
-    }
-
-    let api_key = keychain::load()?
-        .ok_or_else(|| "not paired — run pair_with_code first".to_string())?;
-
+/// Internal install body, callable from both the manual `install_ea`
+/// command and the post-pair auto-install path in `pairing.rs`. Takes
+/// the api_key as an explicit parameter so callers don't have to
+/// double-load from the keychain (and so the post-pair flow can
+/// install before the keychain entry's persistence has been stress
+/// tested across launches — the caller already has the fresh key in
+/// memory). Caller is responsible for the MT5-running check.
+pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> {
     // Fetch latest EA source from the backend (unkeyed), embed the key locally.
     let ea = api::fetch_ea_source(None)
         .await?
         .ok_or_else(|| "unexpected 304 for fresh ea-source fetch".to_string())?;
-    let keyed = ea_writer::render_keyed(&ea.source, &api_key)?;
+    let keyed = ea_writer::render_keyed(&ea.source, api_key)?;
 
     let discovery = mt5_discovery::discover().await;
+    log::info!(
+        "install_ea_inner: discovered {} MT5 terminal(s)",
+        discovery.terminals.len()
+    );
+    for terminal in &discovery.terminals {
+        log::info!(
+            "  · broker={} data_dir={} experts={}",
+            terminal.broker_build, terminal.data_dir, terminal.experts_dir
+        );
+    }
+
+    if discovery.terminals.is_empty() {
+        telemetry::fire("mt5-not-found", None, None, None);
+    } else {
+        telemetry::fire(
+            "mt5-detected",
+            None,
+            None,
+            Some(serde_json::json!({ "terminalCount": discovery.terminals.len() })),
+        );
+    }
+
     let mut written_to = Vec::new();
     let mut whitelist_results = Vec::new();
     let mut profile_results = Vec::new();
@@ -124,18 +147,26 @@ pub async fn install_ea() -> Result<InstallEaResult, String> {
         // 1. Write keyed EA.
         match ea_writer::write_to_experts(Path::new(&terminal.experts_dir), &keyed) {
             Ok(path) => {
+                log::info!("wrote EA to: {}", path);
                 written_to.push(path);
                 telemetry::fire("ea-written", None, None, None);
             }
             Err(e) => {
+                log::warn!(
+                    "failed to write EA to {}: {}",
+                    terminal.experts_dir, e
+                );
                 telemetry::fire("error", None, Some(&e), None);
-                // Keep going — other terminals might still succeed.
             }
         }
 
         // 2. Whitelist URL.
         match ini_writer::whitelist_markitel(Path::new(&terminal.config_dir)) {
             Ok(r) => {
+                log::info!(
+                    "ini whitelist: {} edited={} already_present={}",
+                    terminal.config_dir, r.edited, r.already_present
+                );
                 whitelist_results.push(WhitelistSummary {
                     terminal: terminal.data_dir.clone(),
                     edited: r.edited,
@@ -147,6 +178,7 @@ pub async fn install_ea() -> Result<InstallEaResult, String> {
                 }
             }
             Err(e) => {
+                log::warn!("ini whitelist failed for {}: {}", terminal.config_dir, e);
                 whitelist_results.push(WhitelistSummary {
                     terminal: terminal.data_dir.clone(),
                     edited: false,
@@ -168,6 +200,7 @@ pub async fn install_ea() -> Result<InstallEaResult, String> {
                 });
             }
             Err(e) => {
+                log::warn!("profile_writer failed for {}: {}", terminal.profiles_dir, e);
                 telemetry::fire("error", None, Some(&e), None);
             }
         }
@@ -178,6 +211,20 @@ pub async fn install_ea() -> Result<InstallEaResult, String> {
         whitelist_results,
         profile_results,
     })
+}
+
+/// Tauri command exposed to the UI for manual / repair install.
+/// Used when the user hits "Reinstall EA" from the tray, or when the
+/// auto-install on pair was deferred (e.g. MT5 was running) and the
+/// user is ready to retry.
+#[tauri::command]
+pub async fn install_ea() -> Result<InstallEaResult, String> {
+    if mt5_discovery::is_mt5_running() {
+        return Err("MT5 is currently running. Please close MT5 and try again.".to_string());
+    }
+    let api_key = keychain::load()?
+        .ok_or_else(|| "not paired — run pair_with_code first".to_string())?;
+    install_ea_inner(&api_key).await
 }
 
 #[tauri::command]

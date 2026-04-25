@@ -29,5 +29,21 @@
   <true/>
   <key>com.apple.security.network.client</key>
   <true/>
+  <!--
+    Explicit keychain access group is required for the modern data-
+    protection keychain (which the `keyring` crate v3 uses on macOS) to
+    persist entries across app launches under a stable identity. Without
+    this declaration, the OS falls back to an implicit per-build access
+    group and the entry can vanish silently between launches even on
+    properly Developer-ID-signed builds — exactly the behaviour we hit
+    with the v0.0.5 helper. Hardcoded to the team prefix
+    (43A3ZC429K = Alexey Tatarnikov / Apple Developer Program) since
+    codesign + tauri-action don't expand $(TeamIdentifierPrefix) the way
+    Xcode does.
+  -->
+  <key>keychain-access-groups</key>
+  <array>
+    <string>43A3ZC429K.com.markitel.helper</string>
+  </array>
 </dict>
 </plist>
