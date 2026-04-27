@@ -1,26 +1,34 @@
 name: Release
 
-# Builds signed + notarized Markitel Helper bundles and attaches them
-# to a GitHub Release. Triggered by tags matching `helper-v*`. The
-# repo root IS the helper project (no helper-app/ subdir prefix —
-# this repo was extracted out of the main Markitel monorepo).
+# Builds + signs + notarizes the Markitel Helper macOS bundle and
+# attaches a Gatekeeper-friendly DMG to a GitHub Release. Triggered by
+# tags matching `helper-v*`.
 #
-# Secrets required (configure under Settings → Secrets → Actions):
+# This workflow used to delegate the whole flow to tauri-apps/tauri-action,
+# but two breakages forced a rewrite to discrete steps:
 #
-#   macOS:
-#     APPLE_CERTIFICATE               base64 of the Developer ID Application .p12
-#     APPLE_CERTIFICATE_PASSWORD      password that protects the .p12
-#     APPLE_SIGNING_IDENTITY          e.g. "Developer ID Application: Your Name (TEAMID)"
-#     APPLE_ID                        Apple ID email
-#     APPLE_PASSWORD                  APP-SPECIFIC password from appleid.apple.com
-#     APPLE_TEAM_ID                   10-char team ID
+#   1. Tauri's bundle_dmg.sh is broken on macOS 26 (Tahoe) runners —
+#      it invokes the bundled create-dmg with no positional args, so it
+#      exits "Not enough arguments" and the build aborts. We sidestep
+#      it by building only the .app bundle and wrapping that in a DMG
+#      with macOS-builtin `hdiutil`.
 #
-#   Windows (matrix row commented out below until cert lands):
-#     WINDOWS_CERTIFICATE             base64 of the OV code-signing .pfx
-#     WINDOWS_CERTIFICATE_PASSWORD    password that protects the .pfx
+#   2. tauri-action's release-upload mode tried to push the .app
+#      directory directly to a GitHub Release asset, which fails because
+#      release assets must be files. Splitting the build from the
+#      release step gives us full visibility into each stage and lets
+#      softprops/action-gh-release handle the upload of the produced DMG.
 #
-# NEVER put Apple-ID primary passwords in APPLE_PASSWORD — the notary
-# service specifically requires app-specific passwords.
+# Required secrets (Settings → Secrets → Actions):
+#   APPLE_CERTIFICATE             base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD    password protecting the .p12
+#   APPLE_SIGNING_IDENTITY        e.g. "Developer ID Application: Your Name (TEAMID)"
+#   APPLE_ID                      Apple ID email (for notarization)
+#   APPLE_PASSWORD                APP-SPECIFIC password from appleid.apple.com
+#   APPLE_TEAM_ID                 10-char team ID
+#
+# NEVER put the Apple-ID primary password in APPLE_PASSWORD — the
+# notary service requires app-specific passwords.
 
 on:
   push:
@@ -42,28 +50,13 @@ concurrency:
 
 jobs:
   build:
-    name: Build · ${{ matrix.platform }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-            # DMG dropped — Tauri's bundle_dmg.sh is broken on macOS 26
-            # (Tahoe) runners (invokes create-dmg with no positional args,
-            # exits "Not enough arguments"). We build the .app here and
-            # wrap it ourselves with hdiutil in a follow-up step.
-            bundles: app
-          # Windows row disabled until the OV code-signing cert is
-          # purchased + the `WINDOWS_CERTIFICATE` secret is populated.
-          # Re-enable by un-commenting (and make sure the secrets exist,
-          # otherwise tauri-action will fail the sign step).
-          # - platform: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   bundles: nsis,msi
-
-    runs-on: ${{ matrix.platform }}
+    name: Build · macOS
+    runs-on: macos-latest
     timeout-minutes: 60
+
+    env:
+      TARGET: aarch64-apple-darwin
+      TAG: ${{ github.ref_name || github.event.inputs.tag }}
 
     steps:
       - name: Checkout
@@ -78,88 +71,172 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - name: Cache Cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: ${{ matrix.target }}
-
-      - name: Install Linux system deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
+          key: aarch64-apple-darwin
 
       - name: Install JS deps
         run: npm ci --no-audit --no-fund
 
-      - name: Build + sign + bundle (Tauri)
-        uses: tauri-apps/tauri-action@v0
+      # ─── Code-signing cert into a fresh ephemeral keychain ───────────
+      # We create a build-only keychain and import the Developer ID cert
+      # there. The keychain is unlocked + added to the search list so
+      # `codesign` can find the identity. set-key-partition-list grants
+      # codesign + productbuild access to the imported key without an
+      # interactive password prompt (the runner is non-interactive).
+      - name: Import code-signing cert
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PWD="$(openssl rand -base64 32)"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          # Append the build keychain to the search list (don't replace
+          # the system one or codesign loses its trust roots).
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            $(security list-keychains -d user | xargs)
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list \
+            -S "apple-tool:,apple:,codesign:" \
+            -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH" >/dev/null
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      # ─── Build the .app bundle (no DMG — Tauri's DMG bundler is broken) ──
+      - name: Build app bundle
+        env:
+          # tauri.conf.json says signingIdentity "-" (ad-hoc) for local
+          # dev. CI overrides via env so the .app is signed with the real
+          # Developer ID cert we just imported.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --target "$TARGET" --bundles app
+          APP="src-tauri/target/$TARGET/release/bundle/macos/Markitel Helper.app"
+          [ -d "$APP" ] || { echo "::error::App bundle missing at $APP"; exit 1; }
+          ls -la "$APP/Contents/MacOS/"
+          codesign -dvv "$APP" 2>&1 | head -10
+
+      # ─── Re-sign with hardened runtime + entitlements + Developer ID ───
+      # tauri-action used to do this implicitly; we do it explicitly so
+      # any failure here is easy to read in the logs.
+      - name: Sign app with Developer ID
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/$TARGET/release/bundle/macos/Markitel Helper.app"
+          codesign --force --options runtime \
+            --entitlements src-tauri/entitlements.plist \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            --deep --timestamp "$APP"
+          codesign -dvv "$APP" 2>&1 | head -15
+          codesign --verify --strict --verbose=2 "$APP"
+
+      # ─── Notarize the .app bundle and staple the ticket ─────────────
+      # Skipped silently if APPLE_ID is unset (lets the workflow degrade
+      # to ad-hoc-signed, Gatekeeper-warning ship if creds expire).
+      - name: Notarize app
+        if: env.APPLE_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/$TARGET/release/bundle/macos/Markitel Helper.app"
+          # notarytool wants a zip (or DMG/pkg) — give it a zip of the .app.
+          ZIP="$RUNNER_TEMP/notarize.zip"
+          /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
+          xcrun notarytool submit "$ZIP" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --timeout 30m
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl -a -vv "$APP" || true
+
+      # ─── Wrap signed/notarized .app in a UDZO DMG via hdiutil ───────
+      - name: Build DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/$TARGET/release/bundle/macos/Markitel Helper.app"
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          DMG="Markitel.Helper_${VERSION}_aarch64.dmg"
+          STAGE=$(mktemp -d)
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "MarkitelHelper" \
+            -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          ls -la "$DMG"
+          echo "DMG_PATH=$PWD/$DMG" >> "$GITHUB_ENV"
+          echo "DMG_NAME=$DMG" >> "$GITHUB_ENV"
+
+      # ─── Sign + notarize + staple the DMG itself ────────────────────
+      # Notarizing the DMG (in addition to the .app inside) gives the
+      # Gatekeeper-on-first-mount UX users expect. Mirrors v0.0.7.
+      - name: Sign + notarize DMG
+        if: env.APPLE_ID != ''
+        env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          TAURI_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          TAURI_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        with:
-          tauriScript: npm run tauri
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
-          tagName: ${{ github.ref_name || github.event.inputs.tag }}
-          releaseName: "Markitel Helper ${{ github.ref_name || github.event.inputs.tag }}"
-          releaseBody: |
-            Markitel Helper release.
-
-            Download:
-              • macOS (Apple Silicon): `Markitel.Helper_<version>_aarch64.dmg`
-              • Windows: pending OV code-signing cert
-          releaseDraft: false
-          prerelease: false
-
-      # Wrap the .app in a DMG manually. Tauri's built-in DMG bundler
-      # is broken on macOS 26 — invokes bundle_dmg.sh with no args.
-      # `hdiutil` is built into macOS, no extra deps needed.
-      - name: Build DMG (macOS)
-        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          APP_PATH="src-tauri/target/${{ matrix.target }}/release/bundle/macos/Markitel Helper.app"
-          [ -d "$APP_PATH" ] || { echo "::error::App bundle not found at $APP_PATH"; exit 1; }
-          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          DMG_NAME="Markitel.Helper_${VERSION}_aarch64.dmg"
-          STAGE=$(mktemp -d)
-          cp -R "$APP_PATH" "$STAGE/"
-          ln -s /Applications "$STAGE/Applications"
-          hdiutil create -volname "MarkitelHelper" -srcfolder "$STAGE" -ov -format UDZO "$DMG_NAME"
-          ls -la "$DMG_NAME"
-          echo "DMG_PATH=$PWD/$DMG_NAME" >> "$GITHUB_ENV"
+          codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+            --timestamp "$DMG_PATH"
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --timeout 30m
+          xcrun stapler staple "$DMG_PATH"
+          spctl -a -vv -t install "$DMG_PATH" || true
 
-      # If the .app was code-signed, propagate that to the DMG too so
-      # Gatekeeper accepts it. Skipped silently if no signing identity
-      # was configured (ad-hoc signing leaves `APPLE_SIGNING_IDENTITY`
-      # unset on the runner — same outcome as v0.0.7).
-      - name: Sign DMG (macOS)
-        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        shell: bash
-        run: codesign --force --sign "$APPLE_SIGNING_IDENTITY" "$DMG_PATH"
-
-      - name: Attach DMG to release
-        if: runner.os == 'macOS'
+      # ─── Attach the DMG to the GitHub Release (idempotent) ──────────
+      # softprops/action-gh-release@v2 creates the release if missing or
+      # updates an existing one (e.g. the orphaned stub from a previous
+      # failed run). `clobber: true` overwrites assets with the same name.
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || github.event.inputs.tag }}
+          tag_name: ${{ env.TAG }}
+          name: "Markitel Helper ${{ env.TAG }}"
+          body: |
+            Markitel Helper release.
+
+            Download:
+              • macOS (Apple Silicon): `${{ env.DMG_NAME }}`
+              • Windows: pending OV code-signing cert
           files: ${{ env.DMG_PATH }}
+          draft: false
+          prerelease: false
           fail_on_unmatched_files: true
+
+      # ─── Cleanup keychain ─────────────────────────────────────────────
+      # Always runs so a partial failure doesn't leak the cert into the
+      # runner's keychain. (GH runner images are ephemeral, but be tidy.)
+      - name: Cleanup keychain
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
