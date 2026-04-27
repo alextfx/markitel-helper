@@ -316,13 +316,16 @@ jobs:
             fi
             echo "::error title=Notarize app failed (rc=$RC)::see step summary at $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             # Wipe the .p8 even on failure — `set -e` would normally skip this.
-            [ -n "${P8_PATH:-}" ] && rm -f "$P8_PATH"
+            [ -n "${P8_PATH:-}" ] && rm -f "$P8_PATH" || true
             exit $RC
           fi
           xcrun stapler staple "$APP"
           xcrun stapler validate "$APP"
           spctl -a -vv "$APP"
-          [ -n "${P8_PATH:-}" ] && rm -f "$P8_PATH"
+          # `[ -n "" ] && rm` returns 1 under set -e even when the cleanup
+          # is a no-op (Mode A path has no P8_PATH). Use a proper if so a
+          # successful notarize doesn't fail the step on an empty cleanup.
+          if [ -n "${P8_PATH:-}" ]; then rm -f "$P8_PATH"; fi
 
       # ─── Wrap signed/notarized .app in a UDZO DMG via hdiutil ───────
       - name: Build DMG
