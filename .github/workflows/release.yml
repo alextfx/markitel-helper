@@ -82,6 +82,38 @@ jobs:
       - name: Install JS deps
         run: npm ci --no-audit --no-fund
 
+      # ─── Diagnostic: surface notarization-secret state up front ────
+      # GitHub Actions exposes ::notice:: annotations on the run page
+      # without log-auth. We can't echo the secret VALUES (GH redacts
+      # them), but we can echo whether each is present (non-empty).
+      # If any is MISSING, this fails the run early so the cause is
+      # unambiguous instead of silently shipping an unnotarized DMG.
+      - name: Verify Apple notarization secrets present
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        shell: bash
+        run: |
+          set -eo pipefail
+          state() { [ -n "${1:-}" ] && echo SET || echo MISSING; }
+          ID_S=$(state "${APPLE_ID:-}")
+          PW_S=$(state "${APPLE_PASSWORD:-}")
+          TM_S=$(state "${APPLE_TEAM_ID:-}")
+          CERT_S=$(state "${APPLE_CERTIFICATE:-}")
+          SI_S=$(state "${APPLE_SIGNING_IDENTITY:-}")
+          MSG="APPLE_ID=$ID_S | APPLE_PASSWORD=$PW_S | APPLE_TEAM_ID=$TM_S | APPLE_CERTIFICATE=$CERT_S | APPLE_SIGNING_IDENTITY=$SI_S"
+          echo "$MSG"
+          echo "## Notarization secret presence" >> "$GITHUB_STEP_SUMMARY"
+          echo "$MSG" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$ID_S" = MISSING ] || [ "$PW_S" = MISSING ] || [ "$TM_S" = MISSING ]; then
+            echo "::error title=Apple notarization secrets missing::$MSG — fix at https://github.com/${{ github.repository }}/settings/secrets/actions"
+            exit 1
+          fi
+          echo "::notice title=Apple notarization secrets::$MSG"
+
       # ─── Code-signing cert into a fresh ephemeral keychain ───────────
       # We create a build-only keychain and import the Developer ID cert
       # there. The keychain is unlocked + added to the search list so
