@@ -16,6 +16,7 @@
 mod api;
 mod commands;
 mod config;
+mod default_tpl_writer;
 mod ea_writer;
 mod indicator_writer;
 mod ini_writer;

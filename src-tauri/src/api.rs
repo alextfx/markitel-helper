@@ -222,6 +222,34 @@ pub async fn fetch_indicator(api_key: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("download-indicator read failed: {e}"))
 }
 
+// ── /download-default-tpl ─────────────────────────────────────────────
+//
+// GET — returns the keyed Default.tpl as plain text. Auth via
+// X-Bridge-Key (server renders the user's key into the template's
+// <inputs> ApiKey field before responding). Helper drops the response
+// into <DataFolder>/templates/Default.tpl so MT5 auto-applies it to
+// every new chart, eliminating the manual Navigator drag.
+
+pub async fn fetch_default_tpl(api_key: &str) -> Result<String, String> {
+    let url = format!("{}/api/v1/bridge/download-default-tpl", api_base());
+    let resp = client()
+        .get(&url)
+        .header("X-Bridge-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| format!("download-default-tpl request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("download-default-tpl failed ({status}): {body}"));
+    }
+
+    resp.text()
+        .await
+        .map_err(|e| format!("download-default-tpl read failed: {e}"))
+}
+
 // ── helper ────────────────────────────────────────────────────────────
 
 fn hostname() -> Option<String> {

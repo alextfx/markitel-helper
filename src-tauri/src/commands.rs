@@ -2,7 +2,7 @@
 //! frontend and the Rust backend — each is callable via `invoke()` from
 //! JS. Keep the shapes stable and mirror them in `src/lib/types.ts`.
 
-use crate::{api, ea_writer, indicator_writer, ini_writer, keychain, mt5_discovery, mt5_launcher, pairing, profile_writer, telemetry};
+use crate::{api, default_tpl_writer, ea_writer, indicator_writer, ini_writer, keychain, mt5_discovery, mt5_launcher, pairing, profile_writer, telemetry};
 use serde::Serialize;
 use std::path::Path;
 use tauri::AppHandle;
@@ -108,8 +108,43 @@ pub struct ProfileSummary {
 /// double-load from the keychain (and so the post-pair flow can
 /// install before the keychain entry's persistence has been stress
 /// tested across launches — the caller already has the fresh key in
-/// memory). Caller is responsible for the MT5-running check.
+/// memory).
+///
+/// Bulletproof against any MT5 state: if MT5 is running, force-quits
+/// it (graceful AppleScript / WM_CLOSE first, then SIGKILL / taskkill
+/// /F), waits for file locks to release, runs the install (which
+/// REPLACES any existing Markitel_Bridge files — std::fs::write
+/// overwrites), then auto-relaunches MT5 so the user's only remaining
+/// action is on markitel.com.
 pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> {
+    use std::time::Duration;
+
+    // If MT5 is running, kill it first. On Windows the .mq5/.ex5 files
+    // are file-locked while MT5 has them loaded — overwriting would
+    // fail with permission-denied. After SIGKILL/taskkill we poll for
+    // the process to actually exit (file locks are released a few ms
+    // after the process dies).
+    let mt5_was_running = mt5_discovery::is_mt5_running();
+    if mt5_was_running {
+        log::info!("MT5 detected running — terminating before install");
+        telemetry::fire("mt5-terminate-attempt", None, None, None);
+        if let Err(e) = mt5_launcher::terminate() {
+            log::warn!("terminate command returned error: {e}");
+        }
+        let exited = mt5_launcher::wait_until_exited(Duration::from_secs(8));
+        if !exited {
+            telemetry::fire("mt5-terminate-timeout", None, None, None);
+            return Err(
+                "MT5 is still running after force-quit attempt. Please close MT5 manually and try again.".to_string()
+            );
+        }
+        // Brief grace period for the OS to release file handles MT5
+        // had open. 500ms is conservative — empirically locks release
+        // within ~50-150ms of process exit.
+        std::thread::sleep(Duration::from_millis(500));
+        telemetry::fire("mt5-terminated", None, None, None);
+    }
+
     // Fetch latest EA source from the backend (unkeyed), embed the key locally.
     let ea = api::fetch_ea_source(None)
         .await?
@@ -131,6 +166,25 @@ pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> 
                 "indicator fetch failed ({e}); per-asset Cayman scoring will use F&G fallback until indicator is placed manually"
             );
             telemetry::fire("indicator-fetch-failed", None, Some(&e), None);
+            None
+        }
+    };
+
+    // Fetch the keyed Default.tpl. When MT5 sees this in
+    // <DataFolder>/templates/, it auto-applies it to every NEW chart —
+    // EA + indicator both attach without the user dragging from
+    // Navigator. Same fail-open semantics as the indicator: install
+    // succeeds even if this fetch fails, user just has to drag manually.
+    let default_tpl = match api::fetch_default_tpl(api_key).await {
+        Ok(content) => {
+            log::info!("fetched Default.tpl ({} bytes)", content.len());
+            Some(content)
+        }
+        Err(e) => {
+            log::warn!(
+                "default-tpl fetch failed ({e}); user will need to drag EA from Navigator manually"
+            );
+            telemetry::fire("default-tpl-fetch-failed", None, Some(&e), None);
             None
         }
     };
@@ -202,6 +256,27 @@ pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> 
             }
         }
 
+        // 1.6 Write keyed Default.tpl into <DataFolder>/templates/ so
+        // any new chart auto-attaches the EA + indicator. Eliminates
+        // the manual "drag from Navigator" step. Sibling of MQL5/.
+        if let Some(ref content) = default_tpl {
+            let templates_dir = Path::new(&terminal.data_dir).join("templates");
+            match default_tpl_writer::write_to_templates(&templates_dir, content) {
+                Ok(path) => {
+                    log::info!("wrote Default.tpl to: {}", path);
+                    telemetry::fire("default-tpl-written", None, None, None);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "failed to write Default.tpl to {}: {}",
+                        templates_dir.display(),
+                        e
+                    );
+                    telemetry::fire("error", None, Some(&e), None);
+                }
+            }
+        }
+
         // 2. Whitelist URL.
         match ini_writer::whitelist_markitel(Path::new(&terminal.config_dir)) {
             Ok(r) => {
@@ -248,6 +323,25 @@ pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> 
         }
     }
 
+    // Auto-relaunch MT5 so the user's only remaining action is on
+    // markitel.com. If MT5 wasn't running before install we still
+    // launch it — the install just happened, the user wants to see
+    // the EA + indicator working. Failure to launch is non-fatal:
+    // we already wrote everything, the user can open MT5 themselves.
+    match mt5_launcher::launch() {
+        Ok(()) => {
+            log::info!(
+                "auto-relaunched MT5 (was_running_before={})",
+                mt5_was_running
+            );
+            telemetry::fire("mt5-launched", None, None, None);
+        }
+        Err(e) => {
+            log::warn!("auto-relaunch MT5 failed: {e}");
+            telemetry::fire("mt5-launch-failed", None, Some(&e), None);
+        }
+    }
+
     Ok(InstallEaResult {
         written_to,
         whitelist_results,
@@ -256,14 +350,13 @@ pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> 
 }
 
 /// Tauri command exposed to the UI for manual / repair install.
-/// Used when the user hits "Reinstall EA" from the tray, or when the
-/// auto-install on pair was deferred (e.g. MT5 was running) and the
-/// user is ready to retry.
+/// Used when the user hits "Reinstall EA" from the tray.
+///
+/// No longer rejects when MT5 is running — `install_ea_inner` handles
+/// the force-quit + relaunch flow internally so the install is
+/// bulletproof regardless of MT5 state.
 #[tauri::command]
 pub async fn install_ea() -> Result<InstallEaResult, String> {
-    if mt5_discovery::is_mt5_running() {
-        return Err("MT5 is currently running. Please close MT5 and try again.".to_string());
-    }
     let api_key = keychain::load()?
         .ok_or_else(|| "not paired — run pair_with_code first".to_string())?;
     install_ea_inner(&api_key).await
