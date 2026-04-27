@@ -148,19 +148,33 @@ jobs:
           codesign --verify --strict --verbose=2 "$APP"
 
       # ─── Notarize the .app bundle and staple the ticket ─────────────
-      # Skipped silently if APPLE_ID is unset (lets the workflow degrade
-      # to ad-hoc-signed, Gatekeeper-warning ship if creds expire).
+      # Best-effort: failure here logs but doesn't fail the build, so a
+      # rotated/expired APPLE_PASSWORD still ships a signed DMG (with a
+      # Gatekeeper "unidentified developer" warning on first launch —
+      # right-click → Open works around it). Refresh the app-specific
+      # password at appleid.apple.com if this is logging failures, then
+      # bump a tag to re-notarize. `set -x` is on so the failure line is
+      # visible in CI logs without auth gymnastics.
       - name: Notarize app
-        if: env.APPLE_ID != ''
+        id: notarize_app
+        continue-on-error: true
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -x
+          set -eo pipefail
+          # Surface whether each secret is present (without leaking values).
+          echo "APPLE_ID set:       $([ -n \"${APPLE_ID:-}\" ] && echo yes || echo NO)"
+          echo "APPLE_PASSWORD set: $([ -n \"${APPLE_PASSWORD:-}\" ] && echo yes || echo NO)"
+          echo "APPLE_TEAM_ID set:  $([ -n \"${APPLE_TEAM_ID:-}\" ] && echo yes || echo NO)"
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "::warning::Notarization secrets missing — skipping. DMG will be signed-but-not-notarized."
+            exit 0
+          fi
           APP="src-tauri/target/$TARGET/release/bundle/macos/Markitel Helper.app"
-          # notarytool wants a zip (or DMG/pkg) — give it a zip of the .app.
           ZIP="$RUNNER_TEMP/notarize.zip"
           /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
           xcrun notarytool submit "$ZIP" \
@@ -189,11 +203,13 @@ jobs:
           echo "DMG_PATH=$PWD/$DMG" >> "$GITHUB_ENV"
           echo "DMG_NAME=$DMG" >> "$GITHUB_ENV"
 
-      # ─── Sign + notarize + staple the DMG itself ────────────────────
-      # Notarizing the DMG (in addition to the .app inside) gives the
-      # Gatekeeper-on-first-mount UX users expect. Mirrors v0.0.7.
+      # ─── Sign + notarize the DMG itself ─────────────────────────────
+      # Best-effort like the .app step. If notarization fails, the DMG
+      # is still Developer-ID signed; users see a Gatekeeper warning on
+      # first mount but can right-click → Open.
       - name: Sign + notarize DMG
-        if: env.APPLE_ID != ''
+        id: sign_dmg
+        continue-on-error: true
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -201,9 +217,14 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -x
+          set -eo pipefail
           codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
             --timestamp "$DMG_PATH"
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "::warning::Notarization secrets missing — DMG signed but not notarized."
+            exit 0
+          fi
           xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_PASSWORD" \
