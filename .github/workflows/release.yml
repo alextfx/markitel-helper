@@ -90,29 +90,77 @@ jobs:
       # unambiguous instead of silently shipping an unnotarized DMG.
       - name: Verify Apple notarization secrets present
         env:
+          # App-specific-password auth (mode A)
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # API-key auth (mode B — preferred; more robust, doesn't expire)
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          # Signing — required for either auth mode
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         shell: bash
         run: |
           set -eo pipefail
           state() { [ -n "${1:-}" ] && echo SET || echo MISSING; }
-          ID_S=$(state "${APPLE_ID:-}")
-          PW_S=$(state "${APPLE_PASSWORD:-}")
-          TM_S=$(state "${APPLE_TEAM_ID:-}")
-          CERT_S=$(state "${APPLE_CERTIFICATE:-}")
-          SI_S=$(state "${APPLE_SIGNING_IDENTITY:-}")
-          MSG="APPLE_ID=$ID_S | APPLE_PASSWORD=$PW_S | APPLE_TEAM_ID=$TM_S | APPLE_CERTIFICATE=$CERT_S | APPLE_SIGNING_IDENTITY=$SI_S"
-          echo "$MSG"
-          echo "## Notarization secret presence" >> "$GITHUB_STEP_SUMMARY"
-          echo "$MSG" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$ID_S" = MISSING ] || [ "$PW_S" = MISSING ] || [ "$TM_S" = MISSING ]; then
-            echo "::error title=Apple notarization secrets missing::$MSG — fix at https://github.com/${{ github.repository }}/settings/secrets/actions"
+          # Length surfaces typo issues without leaking values. APPLE_TEAM_ID
+          # MUST be exactly 10 alphanumeric chars; APPLE_PASSWORD app-specific
+          # is 19 chars (`abcd-efgh-ijkl-mnop`); APPLE_ID is an email; API key
+          # ID is 10 chars; API issuer is a UUID (36 chars).
+          fmt_team()  { [ -n "${1:-}" ] && echo "len=${#1}/10 expected" || echo MISSING; }
+          fmt_pass()  { [ -n "${1:-}" ] && echo "len=${#1}/19 expected" || echo MISSING; }
+          fmt_email() { [ -n "${1:-}" ] && echo "len=${#1}, contains_at=$(echo "$1" | grep -q '@' && echo yes || echo no)" || echo MISSING; }
+          fmt_keyid() { [ -n "${1:-}" ] && echo "len=${#1}/10 expected" || echo MISSING; }
+          fmt_issuer(){ [ -n "${1:-}" ] && echo "len=${#1}/36 expected" || echo MISSING; }
+          {
+            echo "## Notarization auth state"
+            echo ""
+            echo "### Mode A — app-specific password"
+            echo "- APPLE_ID:       $(fmt_email "$APPLE_ID")"
+            echo "- APPLE_PASSWORD: $(fmt_pass  "$APPLE_PASSWORD")"
+            echo "- APPLE_TEAM_ID:  $(fmt_team  "$APPLE_TEAM_ID")"
+            echo ""
+            echo "### Mode B — API key (preferred)"
+            echo "- APPLE_API_KEY_ID: $(fmt_keyid "$APPLE_API_KEY_ID")"
+            echo "- APPLE_API_ISSUER: $(fmt_issuer "$APPLE_API_ISSUER")"
+            echo "- APPLE_API_KEY_P8: $(state "$APPLE_API_KEY_P8")"
+            echo ""
+            echo "### Signing"
+            echo "- APPLE_CERTIFICATE:      $(state "$APPLE_CERTIFICATE")"
+            echo "- APPLE_SIGNING_IDENTITY: $(state "$APPLE_SIGNING_IDENTITY")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Determine auth mode
+          MODE_B_OK=$([ -n "${APPLE_API_KEY_ID:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ] && [ -n "${APPLE_API_KEY_P8:-}" ] && echo yes || echo no)
+          MODE_A_OK=$([ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && echo yes || echo no)
+          if [ "$MODE_B_OK" = yes ]; then
+            echo "::notice title=Notarize auth::Using Mode B (API key)"
+            echo "NOTARIZE_AUTH_MODE=apikey" >> "$GITHUB_ENV"
+          elif [ "$MODE_A_OK" = yes ]; then
+            # Format-validate Mode A so a typo'd APPLE_TEAM_ID surfaces
+            # before we burn 3 seconds on a guaranteed-401 notarytool call.
+            FAIL=""
+            if ! echo "$APPLE_TEAM_ID" | grep -Eq '^[A-Z0-9]{10}$'; then
+              FAIL="APPLE_TEAM_ID format invalid (expect exactly 10 uppercase alnum chars; v0.0.7 cert team is '43A3ZC429K'); got len=${#APPLE_TEAM_ID}"
+            elif ! echo "$APPLE_ID" | grep -q '@'; then
+              FAIL="APPLE_ID format invalid (expect an email address); got len=${#APPLE_ID}"
+            elif [ "${#APPLE_PASSWORD}" -ne 19 ]; then
+              FAIL="APPLE_PASSWORD format suspicious (expect 19 chars: 'abcd-efgh-ijkl-mnop'); got len=${#APPLE_PASSWORD} — generate a fresh app-specific password at https://account.apple.com/account/manage and paste WITHOUT leading/trailing whitespace"
+            fi
+            if [ -n "$FAIL" ]; then
+              echo "::error title=Apple notarize secret format::$FAIL"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "**Format check failed:** $FAIL" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "::notice title=Notarize auth::Using Mode A (app-specific password)"
+            echo "NOTARIZE_AUTH_MODE=password" >> "$GITHUB_ENV"
+          else
+            echo "::error title=No Apple notarize creds::Set Mode A (APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID) OR Mode B (APPLE_API_KEY_ID + APPLE_API_ISSUER + APPLE_API_KEY_P8) at https://github.com/${{ github.repository }}/settings/secrets/actions"
             exit 1
           fi
-          echo "::notice title=Apple notarization secrets::$MSG"
 
       # ─── Code-signing cert into a fresh ephemeral keychain ───────────
       # We create a build-only keychain and import the Developer ID cert
@@ -190,9 +238,16 @@ jobs:
       - name: Notarize app
         id: notarize_app
         env:
+          # Mode A — app-specific password
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Mode B — API key (preferred). APPLE_API_KEY_P8 should hold the
+          # contents of the .p8 file (multi-line PEM is fine — GH preserves
+          # newlines in secret values).
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         shell: bash
         run: |
           set -eo pipefail
@@ -200,38 +255,37 @@ jobs:
           ZIP="$RUNNER_TEMP/notarize.zip"
           /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
           ls -la "$ZIP"
-          # Capture notarytool output — we want the failure message in
-          # the run summary if it rejects, so we can debug without log
-          # auth. Tee to both stdout (for logs) and a file (for summary).
+
+          # Build the auth args based on what the diagnostic step picked.
+          # Mode B (API key) is preferred because it doesn't expire and
+          # isn't sensitive to "app-specific password" formatting traps.
+          AUTH_ARGS=()
+          if [ "${NOTARIZE_AUTH_MODE:-}" = "apikey" ]; then
+            P8_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+            printf '%s' "$APPLE_API_KEY_P8" > "$P8_PATH"
+            chmod 600 "$P8_PATH"
+            AUTH_ARGS+=(--key "$P8_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
+          else
+            AUTH_ARGS+=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+          fi
+
           OUT="$RUNNER_TEMP/notarytool.out"
           set +e
-          xcrun notarytool submit "$ZIP" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait --timeout 30m 2>&1 | tee "$OUT"
+          xcrun notarytool submit "$ZIP" "${AUTH_ARGS[@]}" --wait --timeout 30m 2>&1 | tee "$OUT"
           RC=${PIPESTATUS[0]}
           set -e
-          # Always echo to step summary so the user sees notarytool's
-          # actual error / submission ID without needing log access.
           {
-            echo "## Notarize .app"
+            echo "## Notarize .app (mode: ${NOTARIZE_AUTH_MODE:-password})"
             echo '```'
             tail -n 60 "$OUT"
             echo '```'
             echo "exit code: $RC"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ $RC -ne 0 ]; then
-            # Try to fetch the most recent submission's full log, which
-            # has the line-level reason Apple rejected the bundle (e.g.
-            # missing entitlement, hardened-runtime mismatch, etc.).
             SUBMISSION_ID=$(grep -oE 'id: [a-f0-9-]+' "$OUT" | head -1 | awk '{print $2}')
             if [ -n "$SUBMISSION_ID" ]; then
               echo "Fetching submission log for $SUBMISSION_ID..."
-              xcrun notarytool log "$SUBMISSION_ID" \
-                --apple-id "$APPLE_ID" \
-                --password "$APPLE_PASSWORD" \
-                --team-id "$APPLE_TEAM_ID" 2>&1 | tee "$RUNNER_TEMP/notarylog.json" || true
+              xcrun notarytool log "$SUBMISSION_ID" "${AUTH_ARGS[@]}" 2>&1 | tee "$RUNNER_TEMP/notarylog.json" || true
               {
                 echo "### Apple notary log (submission $SUBMISSION_ID)"
                 echo '```json'
@@ -240,11 +294,14 @@ jobs:
               } >> "$GITHUB_STEP_SUMMARY"
             fi
             echo "::error title=Notarize app failed (rc=$RC)::see step summary at $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            # Wipe the .p8 even on failure — `set -e` would normally skip this.
+            [ -n "${P8_PATH:-}" ] && rm -f "$P8_PATH"
             exit $RC
           fi
           xcrun stapler staple "$APP"
           xcrun stapler validate "$APP"
           spctl -a -vv "$APP"
+          [ -n "${P8_PATH:-}" ] && rm -f "$P8_PATH"
 
       # ─── Wrap signed/notarized .app in a UDZO DMG via hdiutil ───────
       - name: Build DMG
@@ -269,29 +326,37 @@ jobs:
       # first mount but can right-click → Open.
       - name: Sign + notarize DMG
         id: sign_dmg
-        continue-on-error: true
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         shell: bash
         run: |
-          set -x
           set -eo pipefail
           codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
             --timestamp "$DMG_PATH"
-          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
-            echo "::warning::Notarization secrets missing — DMG signed but not notarized."
-            exit 0
+
+          # Same auth-mode selection as the .app step. We're past the
+          # validation gate at this point — the .app already notarized
+          # successfully, so these creds are known good.
+          AUTH_ARGS=()
+          if [ "${NOTARIZE_AUTH_MODE:-}" = "apikey" ]; then
+            P8_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}_dmg.p8"
+            printf '%s' "$APPLE_API_KEY_P8" > "$P8_PATH"
+            chmod 600 "$P8_PATH"
+            AUTH_ARGS+=(--key "$P8_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
+          else
+            AUTH_ARGS+=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
           fi
-          xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait --timeout 30m
+
+          xcrun notarytool submit "$DMG_PATH" "${AUTH_ARGS[@]}" --wait --timeout 30m
           xcrun stapler staple "$DMG_PATH"
           spctl -a -vv -t install "$DMG_PATH" || true
+          [ -n "${P8_PATH:-}" ] && rm -f "$P8_PATH" || true
 
       # ─── Attach the DMG to the GitHub Release (idempotent) ──────────
       # softprops/action-gh-release@v2 creates the release if missing or
