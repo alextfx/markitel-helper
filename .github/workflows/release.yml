@@ -49,7 +49,11 @@ jobs:
         include:
           - platform: macos-latest
             target: aarch64-apple-darwin
-            bundles: app,dmg
+            # DMG dropped — Tauri's bundle_dmg.sh is broken on macOS 26
+            # (Tahoe) runners (invokes create-dmg with no positional args,
+            # exits "Not enough arguments"). We build the .app here and
+            # wrap it ourselves with hdiutil in a follow-up step.
+            bundles: app
           # Windows row disabled until the OV code-signing cert is
           # purchased + the `WINDOWS_CERTIFICATE` secret is populated.
           # Re-enable by un-commenting (and make sure the secrets exist,
@@ -121,3 +125,41 @@ jobs:
               • Windows: pending OV code-signing cert
           releaseDraft: false
           prerelease: false
+
+      # Wrap the .app in a DMG manually. Tauri's built-in DMG bundler
+      # is broken on macOS 26 — invokes bundle_dmg.sh with no args.
+      # `hdiutil` is built into macOS, no extra deps needed.
+      - name: Build DMG (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="src-tauri/target/${{ matrix.target }}/release/bundle/macos/Markitel Helper.app"
+          [ -d "$APP_PATH" ] || { echo "::error::App bundle not found at $APP_PATH"; exit 1; }
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          DMG_NAME="Markitel.Helper_${VERSION}_aarch64.dmg"
+          STAGE=$(mktemp -d)
+          cp -R "$APP_PATH" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "MarkitelHelper" -srcfolder "$STAGE" -ov -format UDZO "$DMG_NAME"
+          ls -la "$DMG_NAME"
+          echo "DMG_PATH=$PWD/$DMG_NAME" >> "$GITHUB_ENV"
+
+      # If the .app was code-signed, propagate that to the DMG too so
+      # Gatekeeper accepts it. Skipped silently if no signing identity
+      # was configured (ad-hoc signing leaves `APPLE_SIGNING_IDENTITY`
+      # unset on the runner — same outcome as v0.0.7).
+      - name: Sign DMG (macOS)
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        shell: bash
+        run: codesign --force --sign "$APPLE_SIGNING_IDENTITY" "$DMG_PATH"
+
+      - name: Attach DMG to release
+        if: runner.os == 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || github.event.inputs.tag }}
+          files: ${{ env.DMG_PATH }}
+          fail_on_unmatched_files: true
