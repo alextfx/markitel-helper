@@ -189,34 +189,62 @@ jobs:
       # visible in CI logs without auth gymnastics.
       - name: Notarize app
         id: notarize_app
-        continue-on-error: true
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
-          set -x
           set -eo pipefail
-          # Surface whether each secret is present (without leaking values).
-          echo "APPLE_ID set:       $([ -n \"${APPLE_ID:-}\" ] && echo yes || echo NO)"
-          echo "APPLE_PASSWORD set: $([ -n \"${APPLE_PASSWORD:-}\" ] && echo yes || echo NO)"
-          echo "APPLE_TEAM_ID set:  $([ -n \"${APPLE_TEAM_ID:-}\" ] && echo yes || echo NO)"
-          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
-            echo "::warning::Notarization secrets missing — skipping. DMG will be signed-but-not-notarized."
-            exit 0
-          fi
           APP="src-tauri/target/$TARGET/release/bundle/macos/Markitel Helper.app"
           ZIP="$RUNNER_TEMP/notarize.zip"
           /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
+          ls -la "$ZIP"
+          # Capture notarytool output — we want the failure message in
+          # the run summary if it rejects, so we can debug without log
+          # auth. Tee to both stdout (for logs) and a file (for summary).
+          OUT="$RUNNER_TEMP/notarytool.out"
+          set +e
           xcrun notarytool submit "$ZIP" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait --timeout 30m
+            --wait --timeout 30m 2>&1 | tee "$OUT"
+          RC=${PIPESTATUS[0]}
+          set -e
+          # Always echo to step summary so the user sees notarytool's
+          # actual error / submission ID without needing log access.
+          {
+            echo "## Notarize .app"
+            echo '```'
+            tail -n 60 "$OUT"
+            echo '```'
+            echo "exit code: $RC"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ $RC -ne 0 ]; then
+            # Try to fetch the most recent submission's full log, which
+            # has the line-level reason Apple rejected the bundle (e.g.
+            # missing entitlement, hardened-runtime mismatch, etc.).
+            SUBMISSION_ID=$(grep -oE 'id: [a-f0-9-]+' "$OUT" | head -1 | awk '{print $2}')
+            if [ -n "$SUBMISSION_ID" ]; then
+              echo "Fetching submission log for $SUBMISSION_ID..."
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" 2>&1 | tee "$RUNNER_TEMP/notarylog.json" || true
+              {
+                echo "### Apple notary log (submission $SUBMISSION_ID)"
+                echo '```json'
+                cat "$RUNNER_TEMP/notarylog.json" 2>/dev/null || true
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "::error title=Notarize app failed (rc=$RC)::see step summary at $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            exit $RC
+          fi
           xcrun stapler staple "$APP"
           xcrun stapler validate "$APP"
-          spctl -a -vv "$APP" || true
+          spctl -a -vv "$APP"
 
       # ─── Wrap signed/notarized .app in a UDZO DMG via hdiutil ───────
       - name: Build DMG
