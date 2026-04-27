@@ -1,7 +1,53 @@
+/* Markitel Helper — Apple-modal aesthetic.
+ * Frosted glass background (via window vibrancy), SF Pro typography,
+ * Apple Blue accent, refined spacing scale. */
+
 :root {
-  color-scheme: dark;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  font-size: 14px;
+  color-scheme: light dark;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* Apple system tokens — adapt to light/dark via prefers-color-scheme */
+  --accent: #007aff;        /* Apple Blue / system accent */
+  --accent-hover: #0066d6;
+  --bg-surface: rgba(255, 255, 255, 0.06);
+  --bg-input: rgba(255, 255, 255, 0.08);
+  --bg-input-focus: rgba(255, 255, 255, 0.12);
+  --border: rgba(255, 255, 255, 0.12);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --text: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.62);
+  --text-tertiary: rgba(255, 255, 255, 0.42);
+  --warn-bg: rgba(255, 159, 10, 0.14);
+  --warn-border: rgba(255, 159, 10, 0.35);
+  --warn-text: rgba(255, 211, 105, 0.95);
+  --error-bg: rgba(255, 69, 58, 0.14);
+  --error-border: rgba(255, 69, 58, 0.35);
+  --error-text: rgba(255, 154, 148, 0.95);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-surface: rgba(0, 0, 0, 0.04);
+    --bg-input: rgba(0, 0, 0, 0.05);
+    --bg-input-focus: rgba(0, 0, 0, 0.08);
+    --border: rgba(0, 0, 0, 0.08);
+    --border-strong: rgba(0, 0, 0, 0.14);
+    --text: rgba(0, 0, 0, 0.88);
+    --text-secondary: rgba(0, 0, 0, 0.56);
+    --text-tertiary: rgba(0, 0, 0, 0.36);
+    --warn-bg: rgba(245, 158, 11, 0.10);
+    --warn-border: rgba(245, 158, 11, 0.30);
+    --warn-text: rgba(146, 64, 14, 1);
+    --error-bg: rgba(220, 38, 38, 0.10);
+    --error-border: rgba(220, 38, 38, 0.30);
+    --error-text: rgba(153, 27, 27, 1);
+  }
 }
 
 * {
@@ -17,44 +63,72 @@ body,
 }
 
 body {
-  background: #0b0b0e;
-  color: #eaeaea;
+  /* Transparent so the macOS sidebar vibrancy (tauri.conf
+   * windowEffects: ["sidebar"]) shows through. The traffic-light
+   * controls + drag region come from native chrome (titleBarStyle
+   * Overlay + hiddenTitle in tauri.conf). */
+  background: transparent;
+  color: var(--text);
+  user-select: none;
+  -webkit-user-select: none;
 }
 
+/* Tauri Overlay titlebar leaves the top 28px clear for native traffic
+ * lights — push our content down so they don't sit on the title. */
 .panel {
-  padding: 24px;
+  padding: 44px 28px 24px 28px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
   height: 100%;
+}
+
+/* Drag region — top strip is grabbable for window movement. */
+.panel > header {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+.panel button,
+.panel input,
+.panel a,
+.panel summary {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: baseline;
+  padding-bottom: 4px;
 }
 
 h1 {
-  font-size: 18px;
+  font-size: 22px;
   margin: 0;
   font-weight: 600;
+  letter-spacing: -0.02em;
 }
 
 h2 {
-  font-size: 15px;
-  margin: 0 0 8px 0;
-  font-weight: 500;
+  font-size: 16px;
+  margin: 0 0 6px 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
 }
 
 .version {
   font-size: 11px;
-  color: #888;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
 }
 
 .muted {
-  color: #a0a0a0;
-  line-height: 1.5;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin: 0;
 }
 
 .tiny {
@@ -64,57 +138,96 @@ h2 {
 section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 18px 18px 18px;
+  /* Subtle inner highlight on the top edge — classic Apple panel feel. */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 1px 0 rgba(0, 0, 0, 0.05);
+}
+
+p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.55;
 }
 
 button {
   font: inherit;
-  padding: 8px 16px;
-  border-radius: 6px;
-  background: #1f1f24;
-  color: #eaeaea;
-  border: 1px solid #2a2a30;
+  font-weight: 500;
+  padding: 9px 16px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
   cursor: pointer;
+  transition: background 0.12s ease, transform 0.06s ease;
+  text-align: center;
 }
 
 button:hover {
-  background: #26262c;
+  background: var(--bg-input-focus);
+}
+
+button:active {
+  transform: scale(0.985);
 }
 
 button.primary {
-  background: #2f6feb;
-  border-color: #2f6feb;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 1px 2px rgba(0, 0, 0, 0.10);
 }
 
 button.primary:hover {
-  background: #3d7bf3;
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 button:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
 input[type="text"] {
   font: inherit;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: #15151a;
-  color: #eaeaea;
-  border: 1px solid #2a2a30;
-  letter-spacing: 2px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  letter-spacing: 3px;
   text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+input[type="text"]:focus {
+  outline: none;
+  background: var(--bg-input-focus);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.18);
 }
 
 code {
-  background: #15151a;
+  background: var(--bg-input);
   padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 12px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--text);
 }
 
 .manual-pair {
-  margin-top: 12px;
+  margin-top: 6px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -122,40 +235,58 @@ code {
 
 .manual-pair summary {
   cursor: pointer;
-  color: #a0a0a0;
+  color: var(--text-tertiary);
   font-size: 12px;
+  list-style: none;
+  outline: none;
+}
+.manual-pair summary::-webkit-details-marker {
+  display: none;
+}
+.manual-pair summary::before {
+  content: "›";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.15s ease;
+}
+.manual-pair[open] summary::before {
+  transform: rotate(90deg);
+}
+.manual-pair summary:hover {
+  color: var(--text-secondary);
 }
 
 .warn {
-  background: #3a2e10;
-  border: 1px solid #6a541f;
-  color: #e7c87b;
-  padding: 10px 12px;
-  border-radius: 6px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-text);
+  padding: 11px 13px;
+  border-radius: 10px;
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.5;
 }
 
 .error,
 .error-inline {
-  color: #ff6b6b;
-  font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 12px;
+  color: var(--error-text);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
   white-space: pre-wrap;
-  background: #2a1515;
-  border: 1px solid #4a2020;
-  padding: 10px 12px;
-  border-radius: 6px;
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
+  padding: 11px 13px;
+  border-radius: 10px;
+  margin: 0;
 }
 
 .spinner {
-  width: 24px;
-  height: 24px;
-  border: 2px solid #2a2a30;
-  border-top-color: #2f6feb;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
   border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin: 8px 0;
+  animation: spin 0.7s linear infinite;
+  margin: 6px auto;
 }
 
 @keyframes spin {
@@ -167,11 +298,14 @@ code {
 button.link {
   background: transparent;
   border: none;
-  color: #6f9aff;
+  color: var(--accent);
   padding: 4px 0;
-  text-align: left;
+  text-align: center;
   width: fit-content;
-  font-size: 12px;
+  align-self: center;
+  font-size: 12.5px;
+  font-weight: 500;
+  border-radius: 0;
 }
 
 button.link:hover {
@@ -185,17 +319,40 @@ button.link:hover {
 
 .install-details summary {
   cursor: pointer;
-  color: #a0a0a0;
+  color: var(--text-tertiary);
   font-size: 12px;
+  list-style: none;
+  outline: none;
+  font-weight: 500;
+}
+.install-details summary::-webkit-details-marker {
+  display: none;
+}
+.install-details summary::before {
+  content: "›";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.15s ease;
+}
+.install-details[open] summary::before {
+  transform: rotate(90deg);
 }
 
 ul.paths {
-  margin: 6px 0 4px 16px;
+  margin: 8px 0 4px 12px;
   padding: 0;
   font-size: 11px;
+  list-style: none;
+}
+
+ul.paths li {
+  padding: 3px 0;
 }
 
 ul.paths code {
-  font-size: 11px;
+  font-size: 10.5px;
   word-break: break-all;
+  background: transparent;
+  padding: 0;
+  color: var(--text-secondary);
 }
