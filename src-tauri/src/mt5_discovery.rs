@@ -18,6 +18,10 @@ pub struct Terminal {
     pub data_dir: String,
     /// Path to `MQL5/Experts`, where we drop the keyed EA.
     pub experts_dir: String,
+    /// Path to `MQL5/Indicators`, where we drop the bundled
+    /// Sentiment-Indicator.ex5 binary so the EA's iCustom() can resolve
+    /// it without manual user placement. Sibling of `experts_dir`.
+    pub indicators_dir: String,
     /// Path to `config/`, where terminal.ini and common.ini live.
     pub config_dir: String,
     /// Path to `profiles/`, where our "Markitel" profile would go.
@@ -115,10 +119,14 @@ fn scan_root(root: &Path) -> Vec<Terminal> {
 
         let config_dir = data_dir.join("config");
         let profiles_dir = data_dir.join("profiles");
+        // Sibling of Experts under the same MQL5 parent — used by the
+        // helper to drop the bundled Sentiment-Indicator.ex5.
+        let indicators_dir = parent.join("Indicators");
 
         found.push(Terminal {
             data_dir: data_dir.display().to_string(),
             experts_dir: path.display().to_string(),
+            indicators_dir: indicators_dir.display().to_string(),
             config_dir: config_dir.display().to_string(),
             profiles_dir: profiles_dir.display().to_string(),
             broker_build: classify_broker(data_dir),

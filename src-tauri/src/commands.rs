@@ -2,7 +2,7 @@
 //! frontend and the Rust backend — each is callable via `invoke()` from
 //! JS. Keep the shapes stable and mirror them in `src/lib/types.ts`.
 
-use crate::{api, ea_writer, ini_writer, keychain, mt5_discovery, mt5_launcher, pairing, profile_writer, telemetry};
+use crate::{api, ea_writer, indicator_writer, ini_writer, keychain, mt5_discovery, mt5_launcher, pairing, profile_writer, telemetry};
 use serde::Serialize;
 use std::path::Path;
 use tauri::AppHandle;
@@ -116,6 +116,25 @@ pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> 
         .ok_or_else(|| "unexpected 304 for fresh ea-source fetch".to_string())?;
     let keyed = ea_writer::render_keyed(&ea.source, api_key)?;
 
+    // Fetch the bundled Cayman Sentiment-Indicator.ex5 once and reuse
+    // for every detected terminal. Failure here is non-fatal — EA install
+    // still succeeds, and the engine's universal F&G fallback ensures
+    // every signal still carries a Cayman score (just a market-wide
+    // proxy instead of per-asset AMarkets data).
+    let indicator_bytes = match api::fetch_indicator(api_key).await {
+        Ok(bytes) => {
+            log::info!("fetched indicator binary ({} bytes)", bytes.len());
+            Some(bytes)
+        }
+        Err(e) => {
+            log::warn!(
+                "indicator fetch failed ({e}); per-asset Cayman scoring will use F&G fallback until indicator is placed manually"
+            );
+            telemetry::fire("indicator-fetch-failed", None, Some(&e), None);
+            None
+        }
+    };
+
     let discovery = mt5_discovery::discover().await;
     log::info!(
         "install_ea_inner: discovered {} MT5 terminal(s)",
@@ -157,6 +176,29 @@ pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> 
                     terminal.experts_dir, e
                 );
                 telemetry::fire("error", None, Some(&e), None);
+            }
+        }
+
+        // 1.5 Write Cayman sentiment indicator (best-effort).
+        // Skipped silently if the upstream fetch failed earlier — the
+        // EA still installs and the engine's universal F&G fallback
+        // covers the gap until the indicator is placed manually.
+        if let Some(ref bytes) = indicator_bytes {
+            match indicator_writer::write_to_indicators(
+                Path::new(&terminal.indicators_dir),
+                bytes,
+            ) {
+                Ok(path) => {
+                    log::info!("wrote indicator to: {}", path);
+                    telemetry::fire("indicator-written", None, None, None);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "failed to write indicator to {}: {}",
+                        terminal.indicators_dir, e
+                    );
+                    telemetry::fire("error", None, Some(&e), None);
+                }
             }
         }
 

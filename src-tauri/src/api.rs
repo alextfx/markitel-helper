@@ -189,6 +189,39 @@ pub async fn fetch_helper_version() -> Result<HelperVersionInfo, String> {
         .map_err(|e| format!("helper-version decode failed: {e}"))
 }
 
+// ── /download-indicator ───────────────────────────────────────────────
+//
+// GET — returns the raw bytes of the bundled Cayman
+// Sentiment-Indicator.ex5. Auth via X-Bridge-Key (the user's API
+// key) — same auth surface the EA uses for /sentiment + /heartbeat.
+//
+// Helper calls this once per install + writes the bytes to each
+// detected MT5's MQL5/Indicators/. Failure here is non-fatal: the EA
+// install succeeds without it, and the engine's universal F&G
+// fallback ensures every signal still carries a Cayman score (just a
+// market-wide proxy instead of per-asset AMarkets data).
+
+pub async fn fetch_indicator(api_key: &str) -> Result<Vec<u8>, String> {
+    let url = format!("{}/api/v1/bridge/download-indicator", api_base());
+    let resp = client()
+        .get(&url)
+        .header("X-Bridge-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| format!("download-indicator request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("download-indicator failed ({status}): {body}"));
+    }
+
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("download-indicator read failed: {e}"))
+}
+
 // ── helper ────────────────────────────────────────────────────────────
 
 fn hostname() -> Option<String> {

@@ -17,6 +17,7 @@ mod api;
 mod commands;
 mod config;
 mod ea_writer;
+mod indicator_writer;
 mod ini_writer;
 mod keychain;
 mod mt5_discovery;
