@@ -222,32 +222,66 @@ pub async fn fetch_indicator(api_key: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("download-indicator read failed: {e}"))
 }
 
-// ── /download-default-tpl ─────────────────────────────────────────────
-//
-// GET — returns the keyed Default.tpl as plain text. Auth via
-// X-Bridge-Key (server renders the user's key into the template's
-// <inputs> ApiKey field before responding). Helper drops the response
-// into <DataFolder>/templates/Default.tpl so MT5 auto-applies it to
-// every new chart, eliminating the manual Navigator drag.
-
-pub async fn fetch_default_tpl(api_key: &str) -> Result<String, String> {
-    let url = format!("{}/api/v1/bridge/download-default-tpl", api_base());
+// The signed, generic EA binary and keyed named template are both required.
+// A source file alone is not executable, and the old Default.tpl endpoint was
+// retired because it could attach a trading EA to every new chart.
+pub async fn fetch_ea_binary(api_key: &str) -> Result<Vec<u8>, String> {
+    let url = format!("{}/api/v1/bridge/download-ea-binary", api_base());
     let resp = client()
         .get(&url)
         .header("X-Bridge-Key", api_key)
         .send()
         .await
-        .map_err(|e| format!("download-default-tpl request failed: {e}"))?;
+        .map_err(|e| format!("download-ea-binary request failed: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("download-default-tpl failed ({status}): {body}"));
+        return Err(format!("download-ea-binary failed ({status}): {body}"));
     }
 
-    resp.text()
+    let bytes = resp
+        .bytes()
         .await
-        .map_err(|e| format!("download-default-tpl read failed: {e}"))
+        .map_err(|e| format!("download-ea-binary read failed: {e}"))?;
+    if bytes.len() < 1024 {
+        return Err("download-ea-binary returned an incomplete executable".to_string());
+    }
+    Ok(bytes.to_vec())
+}
+
+pub async fn fetch_markitel_tpl(api_key: &str) -> Result<String, String> {
+    let url = format!("{}/api/v1/bridge/download-markitel-tpl", api_base());
+    let resp = client()
+        .get(&url)
+        .header("X-Bridge-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| format!("download-markitel-tpl request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!("download-markitel-tpl failed ({status})"));
+    }
+
+    let template = resp
+        .text()
+        .await
+        .map_err(|e| format!("download-markitel-tpl read failed: {e}"))?;
+    let valid_signing_secret = template.lines().any(|line| {
+        let Some(value) = line.strip_prefix("OrderSigningSecret=") else {
+            return false;
+        };
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if !template.contains("name=Markitel_Bridge")
+        || !template.contains(&format!("ApiKey={api_key}"))
+        || !valid_signing_secret
+        || template.contains("__ORDER_SIGNING_SECRET__")
+    {
+        return Err("download-markitel-tpl returned an incomplete keyed template".to_string());
+    }
+    Ok(template)
 }
 
 // ── helper ────────────────────────────────────────────────────────────

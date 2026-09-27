@@ -2,7 +2,10 @@
 //! frontend and the Rust backend — each is callable via `invoke()` from
 //! JS. Keep the shapes stable and mirror them in `src/lib/types.ts`.
 
-use crate::{api, default_tpl_writer, ea_writer, indicator_writer, ini_writer, keychain, mt5_discovery, mt5_launcher, pairing, profile_writer, telemetry};
+use crate::{
+    api, ea_writer, indicator_writer, ini_writer, keychain, mt5_discovery, mt5_launcher,
+    named_tpl_writer, pairing, profile_writer, telemetry,
+};
 use serde::Serialize;
 use std::path::Path;
 use tauri::AppHandle;
@@ -18,12 +21,10 @@ pub struct HelperStatus {
 #[tauri::command]
 pub async fn status() -> HelperStatus {
     let loaded = keychain::load().ok().flatten();
-    let prefix = loaded.as_deref().map(|k| k.chars().take(11).collect::<String>());
-    log::info!(
-        "status(): paired={}, prefix={:?}",
-        loaded.is_some(),
-        prefix,
-    );
+    let prefix = loaded
+        .as_deref()
+        .map(|k| k.chars().take(11).collect::<String>());
+    log::info!("status(): paired={}, prefix={:?}", loaded.is_some(), prefix,);
     HelperStatus {
         paired: loaded.is_some(),
         api_key_prefix: prefix,
@@ -119,6 +120,33 @@ pub struct ProfileSummary {
 pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> {
     use std::time::Duration;
 
+    // Acquire every required asset before interrupting a running terminal.
+    // The compiled binary is generic; the named template carries both inputs.
+    let ea = api::fetch_ea_source(None)
+        .await?
+        .ok_or_else(|| "unexpected 304 for fresh ea-source fetch".to_string())?;
+    let keyed = ea_writer::render_keyed(&ea.source, api_key)?;
+    let binary = api::fetch_ea_binary(api_key).await?;
+    let named_template = api::fetch_markitel_tpl(api_key).await?;
+    let discovery = mt5_discovery::discover().await;
+    if discovery.terminals.is_empty() {
+        telemetry::fire("mt5-not-found", None, None, None);
+        return Err(
+            "No MT5 terminal data folder was found. Open MT5 once, then retry the install."
+                .to_string(),
+        );
+    }
+
+    // Optional download also happens before MT5 is interrupted.
+    let indicator_bytes = match api::fetch_indicator(api_key).await {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            log::warn!("indicator fetch failed ({e}); per-asset Cayman scoring will use F&G fallback until indicator is placed manually");
+            telemetry::fire("indicator-fetch-failed", None, Some(&e), None);
+            None
+        }
+    };
+
     // If MT5 is running, kill it first. On Windows the .mq5/.ex5 files
     // are file-locked while MT5 has them loaded — overwriting would
     // fail with permission-denied. After SIGKILL/taskkill we poll for
@@ -145,51 +173,6 @@ pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> 
         telemetry::fire("mt5-terminated", None, None, None);
     }
 
-    // Fetch latest EA source from the backend (unkeyed), embed the key locally.
-    let ea = api::fetch_ea_source(None)
-        .await?
-        .ok_or_else(|| "unexpected 304 for fresh ea-source fetch".to_string())?;
-    let keyed = ea_writer::render_keyed(&ea.source, api_key)?;
-
-    // Fetch the bundled Cayman Sentiment-Indicator.ex5 once and reuse
-    // for every detected terminal. Failure here is non-fatal — EA install
-    // still succeeds, and the engine's universal F&G fallback ensures
-    // every signal still carries a Cayman score (just a market-wide
-    // proxy instead of per-asset AMarkets data).
-    let indicator_bytes = match api::fetch_indicator(api_key).await {
-        Ok(bytes) => {
-            log::info!("fetched indicator binary ({} bytes)", bytes.len());
-            Some(bytes)
-        }
-        Err(e) => {
-            log::warn!(
-                "indicator fetch failed ({e}); per-asset Cayman scoring will use F&G fallback until indicator is placed manually"
-            );
-            telemetry::fire("indicator-fetch-failed", None, Some(&e), None);
-            None
-        }
-    };
-
-    // Fetch the keyed Default.tpl. When MT5 sees this in
-    // <DataFolder>/templates/, it auto-applies it to every NEW chart —
-    // EA + indicator both attach without the user dragging from
-    // Navigator. Same fail-open semantics as the indicator: install
-    // succeeds even if this fetch fails, user just has to drag manually.
-    let default_tpl = match api::fetch_default_tpl(api_key).await {
-        Ok(content) => {
-            log::info!("fetched Default.tpl ({} bytes)", content.len());
-            Some(content)
-        }
-        Err(e) => {
-            log::warn!(
-                "default-tpl fetch failed ({e}); user will need to drag EA from Navigator manually"
-            );
-            telemetry::fire("default-tpl-fetch-failed", None, Some(&e), None);
-            None
-        }
-    };
-
-    let discovery = mt5_discovery::discover().await;
     log::info!(
         "install_ea_inner: discovered {} MT5 terminal(s)",
         discovery.terminals.len()
@@ -197,131 +180,124 @@ pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> 
     for terminal in &discovery.terminals {
         log::info!(
             "  · broker={} data_dir={} experts={}",
-            terminal.broker_build, terminal.data_dir, terminal.experts_dir
+            terminal.broker_build,
+            terminal.data_dir,
+            terminal.experts_dir
         );
     }
 
-    if discovery.terminals.is_empty() {
-        telemetry::fire("mt5-not-found", None, None, None);
-    } else {
-        telemetry::fire(
-            "mt5-detected",
-            None,
-            None,
-            Some(serde_json::json!({ "terminalCount": discovery.terminals.len() })),
-        );
-    }
+    telemetry::fire(
+        "mt5-detected",
+        None,
+        None,
+        Some(serde_json::json!({ "terminalCount": discovery.terminals.len() })),
+    );
 
     let mut written_to = Vec::new();
     let mut whitelist_results = Vec::new();
     let mut profile_results = Vec::new();
 
-    for terminal in &discovery.terminals {
-        // 1. Write keyed EA.
-        match ea_writer::write_to_experts(Path::new(&terminal.experts_dir), &keyed) {
-            Ok(path) => {
-                log::info!("wrote EA to: {}", path);
-                written_to.push(path);
-                telemetry::fire("ea-written", None, None, None);
+    let write_result = (|| -> Result<(), String> {
+        for terminal in &discovery.terminals {
+            // Never report this terminal installed unless source, executable and
+            // one-chart template all landed. A source-only install cannot run.
+            let mql5_dir = Path::new(&terminal.experts_dir)
+                .parent()
+                .ok_or_else(|| "MT5 Experts folder has no MQL5 parent".to_string())?;
+            let tpl_dir = mql5_dir.join("Profiles").join("Templates");
+            let legacy_defaults = [
+                tpl_dir.join("Default.tpl"),
+                Path::new(&terminal.data_dir)
+                    .join("templates")
+                    .join("Default.tpl"),
+                Path::new(&terminal.data_dir)
+                    .parent()
+                    .ok_or_else(|| "MT5 data folder has no parent".to_string())?
+                    .join("templates")
+                    .join("Default.tpl"),
+            ];
+            for legacy in &legacy_defaults {
+                named_tpl_writer::disable_legacy_auto_template(legacy)?;
             }
-            Err(e) => {
-                log::warn!(
-                    "failed to write EA to {}: {}",
-                    terminal.experts_dir, e
-                );
-                telemetry::fire("error", None, Some(&e), None);
-            }
-        }
+            ea_writer::write_to_experts(Path::new(&terminal.experts_dir), &keyed)?;
+            ea_writer::write_binary_to_experts(Path::new(&terminal.experts_dir), &binary)?;
+            let path = named_tpl_writer::write_to_templates(&tpl_dir, &named_template)?;
+            written_to.push(path);
+            telemetry::fire("ea-written", None, None, None);
 
-        // 1.5 Write Cayman sentiment indicator (best-effort).
-        // Skipped silently if the upstream fetch failed earlier — the
-        // EA still installs and the engine's universal F&G fallback
-        // covers the gap until the indicator is placed manually.
-        if let Some(ref bytes) = indicator_bytes {
-            match indicator_writer::write_to_indicators(
-                Path::new(&terminal.indicators_dir),
-                bytes,
-            ) {
-                Ok(path) => {
-                    log::info!("wrote indicator to: {}", path);
-                    telemetry::fire("indicator-written", None, None, None);
+            // 1.5 Write Cayman sentiment indicator (best-effort).
+            // Skipped silently if the upstream fetch failed earlier — the
+            // EA still installs and the engine's universal F&G fallback
+            // covers the gap until the indicator is placed manually.
+            if let Some(ref bytes) = indicator_bytes {
+                match indicator_writer::write_to_indicators(
+                    Path::new(&terminal.indicators_dir),
+                    bytes,
+                ) {
+                    Ok(path) => {
+                        log::info!("wrote indicator to: {}", path);
+                        telemetry::fire("indicator-written", None, None, None);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "failed to write indicator to {}: {}",
+                            terminal.indicators_dir,
+                            e
+                        );
+                        telemetry::fire("error", None, Some(&e), None);
+                    }
+                }
+            }
+
+            // 2. Whitelist URL.
+            match ini_writer::whitelist_markitel(Path::new(&terminal.config_dir)) {
+                Ok(r) => {
+                    log::info!(
+                        "ini whitelist: {} edited={} already_present={}",
+                        terminal.config_dir,
+                        r.edited,
+                        r.already_present
+                    );
+                    whitelist_results.push(WhitelistSummary {
+                        terminal: terminal.data_dir.clone(),
+                        edited: r.edited,
+                        already_present: r.already_present,
+                        error: None,
+                    });
+                    if r.edited {
+                        telemetry::fire("ini-whitelisted", None, None, None);
+                    }
                 }
                 Err(e) => {
-                    log::warn!(
-                        "failed to write indicator to {}: {}",
-                        terminal.indicators_dir, e
-                    );
+                    log::warn!("ini whitelist failed for {}: {}", terminal.config_dir, e);
+                    whitelist_results.push(WhitelistSummary {
+                        terminal: terminal.data_dir.clone(),
+                        edited: false,
+                        already_present: false,
+                        error: Some(e),
+                    });
+                }
+            }
+
+            // 3. Write Markitel profile (STUB — Phase 0).
+            match profile_writer::write_profile(Path::new(&terminal.profiles_dir)) {
+                Ok(outcome) => {
+                    if matches!(outcome, profile_writer::ProfileWriteOutcome::Written) {
+                        telemetry::fire("profile-written", None, None, None);
+                    }
+                    profile_results.push(ProfileSummary {
+                        terminal: terminal.data_dir.clone(),
+                        outcome,
+                    });
+                }
+                Err(e) => {
+                    log::warn!("profile_writer failed for {}: {}", terminal.profiles_dir, e);
                     telemetry::fire("error", None, Some(&e), None);
                 }
             }
         }
-
-        // 1.6 Write keyed Default.tpl into <DataFolder>/templates/ so
-        // any new chart auto-attaches the EA + indicator. Eliminates
-        // the manual "drag from Navigator" step. Sibling of MQL5/.
-        if let Some(ref content) = default_tpl {
-            let templates_dir = Path::new(&terminal.data_dir).join("templates");
-            match default_tpl_writer::write_to_templates(&templates_dir, content) {
-                Ok(path) => {
-                    log::info!("wrote Default.tpl to: {}", path);
-                    telemetry::fire("default-tpl-written", None, None, None);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "failed to write Default.tpl to {}: {}",
-                        templates_dir.display(),
-                        e
-                    );
-                    telemetry::fire("error", None, Some(&e), None);
-                }
-            }
-        }
-
-        // 2. Whitelist URL.
-        match ini_writer::whitelist_markitel(Path::new(&terminal.config_dir)) {
-            Ok(r) => {
-                log::info!(
-                    "ini whitelist: {} edited={} already_present={}",
-                    terminal.config_dir, r.edited, r.already_present
-                );
-                whitelist_results.push(WhitelistSummary {
-                    terminal: terminal.data_dir.clone(),
-                    edited: r.edited,
-                    already_present: r.already_present,
-                    error: None,
-                });
-                if r.edited {
-                    telemetry::fire("ini-whitelisted", None, None, None);
-                }
-            }
-            Err(e) => {
-                log::warn!("ini whitelist failed for {}: {}", terminal.config_dir, e);
-                whitelist_results.push(WhitelistSummary {
-                    terminal: terminal.data_dir.clone(),
-                    edited: false,
-                    already_present: false,
-                    error: Some(e),
-                });
-            }
-        }
-
-        // 3. Write Markitel profile (STUB — Phase 0).
-        match profile_writer::write_profile(Path::new(&terminal.profiles_dir)) {
-            Ok(outcome) => {
-                if matches!(outcome, profile_writer::ProfileWriteOutcome::Written) {
-                    telemetry::fire("profile-written", None, None, None);
-                }
-                profile_results.push(ProfileSummary {
-                    terminal: terminal.data_dir.clone(),
-                    outcome,
-                });
-            }
-            Err(e) => {
-                log::warn!("profile_writer failed for {}: {}", terminal.profiles_dir, e);
-                telemetry::fire("error", None, Some(&e), None);
-            }
-        }
-    }
+        Ok(())
+    })();
 
     // Auto-relaunch MT5 so the user's only remaining action is on
     // markitel.com. If MT5 wasn't running before install we still
@@ -342,6 +318,8 @@ pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> 
         }
     }
 
+    write_result?;
+
     Ok(InstallEaResult {
         written_to,
         whitelist_results,
@@ -357,15 +335,14 @@ pub async fn install_ea_inner(api_key: &str) -> Result<InstallEaResult, String> 
 /// bulletproof regardless of MT5 state.
 #[tauri::command]
 pub async fn install_ea() -> Result<InstallEaResult, String> {
-    let api_key = keychain::load()?
-        .ok_or_else(|| "not paired — run pair_with_code first".to_string())?;
+    let api_key =
+        keychain::load()?.ok_or_else(|| "not paired — run pair_with_code first".to_string())?;
     install_ea_inner(&api_key).await
 }
 
 #[tauri::command]
 pub async fn rotate_key() -> Result<String, String> {
-    let current = keychain::load()?
-        .ok_or_else(|| "not paired".to_string())?;
+    let current = keychain::load()?.ok_or_else(|| "not paired".to_string())?;
     let resp = api::rotate_api_key(&current).await?;
     keychain::save(&resp.api_key)?;
     Ok(resp.connection.api_key_prefix)
