@@ -16,13 +16,13 @@
 mod api;
 mod commands;
 mod config;
-mod default_tpl_writer;
 mod ea_writer;
 mod indicator_writer;
 mod ini_writer;
 mod keychain;
 mod mt5_discovery;
 mod mt5_launcher;
+mod named_tpl_writer;
 mod pairing;
 mod profile_writer;
 mod telemetry;
@@ -46,15 +46,26 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             // ── Tray icon + menu ──
-            let show_item = MenuItem::with_id(app, "show", "Open Markitel Helper…", true, None::<&str>)?;
-            let pair_item = MenuItem::with_id(app, "pair", "Pair with Markitel…", true, None::<&str>)?;
-            let rotate_item = MenuItem::with_id(app, "rotate", "Rotate API Key", true, None::<&str>)?;
-            let reinstall_item = MenuItem::with_id(app, "reinstall", "Reinstall EA", true, None::<&str>)?;
+            let show_item =
+                MenuItem::with_id(app, "show", "Open Markitel Helper…", true, None::<&str>)?;
+            let pair_item =
+                MenuItem::with_id(app, "pair", "Pair with Markitel…", true, None::<&str>)?;
+            let rotate_item =
+                MenuItem::with_id(app, "rotate", "Rotate API Key", true, None::<&str>)?;
+            let reinstall_item =
+                MenuItem::with_id(app, "reinstall", "Reinstall EA", true, None::<&str>)?;
             let separator = MenuItem::with_id(app, "sep", "—", false, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
-                &[&show_item, &pair_item, &rotate_item, &reinstall_item, &separator, &quit_item],
+                &[
+                    &show_item,
+                    &pair_item,
+                    &rotate_item,
+                    &reinstall_item,
+                    &separator,
+                    &quit_item,
+                ],
             )?;
 
             let _tray = TrayIconBuilder::with_id("main-tray")

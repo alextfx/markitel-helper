@@ -17,7 +17,10 @@ pub fn is_valid_key(key: &str) -> bool {
         return false;
     }
     let tail = &key[3..];
-    tail.len() == 64 && tail.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    tail.len() == 64
+        && tail
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// Embed `api_key` into `source` and return the keyed EA as a String.
@@ -50,8 +53,7 @@ pub fn write_to_experts(experts_dir: &Path, keyed_source: &str) -> Result<String
         ));
     }
     let out = experts_dir.join("Markitel_Bridge.mq5");
-    std::fs::write(&out, keyed_source)
-        .map_err(|e| format!("write EA failed: {e}"))?;
+    std::fs::write(&out, keyed_source).map_err(|e| format!("write EA failed: {e}"))?;
 
     // macOS: clear the quarantine xattr. Writing the file via std::fs
     // shouldn't set the attribute in the first place (that's an
@@ -64,5 +66,22 @@ pub fn write_to_experts(experts_dir: &Path, keyed_source: &str) -> Result<String
             .status();
     }
 
+    Ok(out.display().to_string())
+}
+
+/// Place the server-verified compiled EA beside the keyed source. The named
+/// template supplies its inputs on one dedicated chart.
+pub fn write_binary_to_experts(experts_dir: &Path, binary: &[u8]) -> Result<String, String> {
+    if !experts_dir.is_dir() {
+        return Err(format!(
+            "experts directory does not exist: {}",
+            experts_dir.display()
+        ));
+    }
+    if binary.len() < 1024 {
+        return Err("compiled EA is incomplete".to_string());
+    }
+    let out = experts_dir.join("Markitel_Bridge.ex5");
+    std::fs::write(&out, binary).map_err(|e| format!("write compiled EA failed: {e}"))?;
     Ok(out.display().to_string())
 }

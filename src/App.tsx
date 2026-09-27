@@ -195,9 +195,6 @@ export function App() {
   };
 
   const writtenTo = install?.writtenTo ?? [];
-  const profileNeedsManualDrag = (install?.profileResults ?? []).some(
-    (p) => p.outcome === "NeedsManualDrag",
-  );
 
   return (
     <div className="panel">
@@ -212,9 +209,8 @@ export function App() {
         <section>
           <h2>Connect your Markitel account</h2>
           <p className="muted">
-            Click below to open Markitel in your browser. Pick "Markitel
-            Helper" on the Connect MT5 page and the helper takes over —
-            no copying API keys, no dragging files.
+            Open Markitel in your browser and choose the MT5 installer. Helper
+            pairing will return after its named-template update is released.
           </p>
           <button className="primary" onClick={handlePairWeb}>
             Pair with Markitel
@@ -267,7 +263,7 @@ export function App() {
             I closed MT5 — install now
           </button>
           <p className="tiny muted">
-            We'll write <strong>Markitel_Bridge.mq5</strong> into every
+            We'll write the compiled EA and private named template into every
             MT5 install we find, plus add{" "}
             <code>https://markitel.com</code> to the WebRequest
             whitelist.
@@ -294,7 +290,7 @@ export function App() {
         <section>
           <h2>Bridge installed</h2>
           <p>
-            Wrote <strong>Markitel_Bridge.mq5</strong> to{" "}
+            Wrote the compiled EA and private chart template to{" "}
             <strong>{writtenTo.length}</strong> MT5{" "}
             terminal{writtenTo.length === 1 ? "" : "s"}.
           </p>
@@ -319,23 +315,13 @@ export function App() {
               </p>
             </details>
           )}
-          {writtenTo.length === 0 && (
-            <div className="warn">
-              We didn't find any MT5 installs to write to. If MT5 is
-              installed in a custom location, this fallback is on our
-              roadmap — for now, drop{" "}
-              <strong>Markitel_Bridge.mq5</strong> into your{" "}
-              <code>MQL5/Experts/</code> folder manually.
-            </div>
-          )}
-          {profileNeedsManualDrag && (
-            <div className="warn">
-              One last manual step inside MT5: drag{" "}
-              <strong>Markitel_Bridge</strong> from the Navigator panel
-              onto any chart, then click the green AutoTrading button
-              up top. (Auto-attach is on the roadmap as Phase 0.)
-            </div>
-          )}
+          <div className="warn">
+            In MT5, open one dedicated chart and apply{" "}
+            <strong>Templates → Markitel_Bridge</strong>. Check that both{" "}
+            <code>ApiKey</code> and <code>OrderSigningSecret</code> are filled,
+            then verify the first heartbeat on Markitel. AutoTrading is not
+            needed for the heartbeat.
+          </div>
           <button className="primary" onClick={handleLaunchMt5}>
             Open MT5
           </button>
